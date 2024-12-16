@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -973,14 +973,13 @@ public class TTY implements EventNotifier {
                         return;
                     }
                 }
-            } else if (token.equals("-trackvthreads")) {
+            } else if (token.equals("-trackallthreads")) {
                 trackVthreads = true;
             } else if (token.equals("-X")) {
                 usageError("Use java minus X to see");
                 return;
             } else if (
                    // Standard VM options passed on
-                   token.equals("-v") || token.startsWith("-v:") ||  // -v[:...]
                    token.startsWith("-verbose") ||                  // -verbose[:...]
                    token.startsWith("-D") ||
                    // -classpath handled below
@@ -988,12 +987,9 @@ public class TTY implements EventNotifier {
                    token.startsWith("-X") ||
                    // Old-style options (These should remain in place as long as
                    //  the standard VM accepts them)
-                   token.equals("-noasyncgc") || token.equals("-prof") ||
                    token.equals("-verify") ||
                    token.equals("-verifyremote") ||
-                   token.equals("-verbosegc") ||
-                   token.startsWith("-ms") || token.startsWith("-mx") ||
-                   token.startsWith("-ss") || token.startsWith("-oss") ) {
+                   token.equals("-verbosegc")) {
 
                 javaArgs = addArgument(javaArgs, token);
             } else if (token.startsWith("-R")) {
@@ -1169,7 +1165,7 @@ public class TTY implements EventNotifier {
         }
 
         if (connectSpec.startsWith("com.sun.jdi.CommandLineLaunch:") && trackVthreads) {
-            connectSpec += "enumeratevthreads=y,";
+            connectSpec += "includevirtualthreads=y,";
         }
 
         try {

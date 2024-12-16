@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1995, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -44,7 +44,6 @@ import javax.accessibility.AccessibleStateSet;
 import javax.accessibility.AccessibleText;
 import javax.swing.text.AttributeSet;
 
-import sun.awt.AWTPermissions;
 import sun.awt.InputMethodSupport;
 
 /**
@@ -66,6 +65,7 @@ import sun.awt.InputMethodSupport;
  * @author      Sami Shaio
  * @author      Arthur van Hoff
  * @since       1.0
+ * @sealedGraph
  */
 public sealed class TextComponent extends Component implements Accessible
      permits TextArea,
@@ -741,20 +741,6 @@ public sealed class TextComponent extends Component implements Accessible
             str += ",editable";
         }
         return str + ",selection=" + getSelectionStart() + "-" + getSelectionEnd();
-    }
-
-    /**
-     * Assigns a valid value to the canAccessClipboard instance variable.
-     */
-    private boolean canAccessClipboard() {
-        @SuppressWarnings("removal")
-        SecurityManager sm = System.getSecurityManager();
-        if (sm == null) return true;
-        try {
-            sm.checkPermission(AWTPermissions.ACCESS_CLIPBOARD_PERMISSION);
-            return true;
-        } catch (SecurityException e) {}
-        return false;
     }
 
     /*

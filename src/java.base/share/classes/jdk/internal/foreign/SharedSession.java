@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,8 +27,8 @@ package jdk.internal.foreign;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.lang.ref.Cleaner;
 import jdk.internal.misc.ScopedMemoryAccess;
+import jdk.internal.invoke.MhUtil;
 import jdk.internal.vm.annotation.ForceInline;
 
 /**
@@ -40,12 +40,14 @@ import jdk.internal.vm.annotation.ForceInline;
  * Since it is the responsibility of the closing thread to make sure that no concurrent access is possible,
  * checking the liveness bit upon access can be performed in plain mode, as in the confined case.
  */
-class SharedSession extends MemorySessionImpl {
+sealed class SharedSession extends MemorySessionImpl permits ImplicitSession {
 
     private static final ScopedMemoryAccess SCOPED_MEMORY_ACCESS = ScopedMemoryAccess.getScopedMemoryAccess();
 
-    SharedSession(Cleaner cleaner) {
-        super(null, new SharedResourceList(), cleaner);
+    private static final int CLOSED_ACQUIRE_COUNT = -1;
+
+    SharedSession() {
+        super(null, new SharedResourceList());
     }
 
     @Override
@@ -53,15 +55,15 @@ class SharedSession extends MemorySessionImpl {
     public void acquire0() {
         int value;
         do {
-            value = (int) STATE.getVolatile(this);
-            if (value < OPEN) {
+            value = (int) ACQUIRE_COUNT.getVolatile(this);
+            if (value < 0) {
                 //segment is not open!
-                throw new IllegalStateException("Already closed");
+                throw sharedSessionAlreadyClosed();
             } else if (value == MAX_FORKS) {
                 //overflow
-                throw new IllegalStateException("Session acquire limit exceeded");
+                throw tooManyAcquires();
             }
-        } while (!STATE.compareAndSet(this, value, value + 1));
+        } while (!ACQUIRE_COUNT.compareAndSet(this, value, value + 1));
     }
 
     @Override
@@ -69,31 +71,33 @@ class SharedSession extends MemorySessionImpl {
     public void release0() {
         int value;
         do {
-            value = (int) STATE.getVolatile(this);
-            if (value <= OPEN) {
+            value = (int) ACQUIRE_COUNT.getVolatile(this);
+            if (value <= 0) {
                 //cannot get here - we can't close segment twice
-                throw new IllegalStateException("Already closed");
+                throw sharedSessionAlreadyClosed();
             }
-        } while (!STATE.compareAndSet(this, value, value - 1));
+        } while (!ACQUIRE_COUNT.compareAndSet(this, value, value - 1));
     }
 
     void justClose() {
-        int prevState = (int) STATE.compareAndExchange(this, OPEN, CLOSING);
-        if (prevState < 0) {
-            throw new IllegalStateException("Already closed");
-        } else if (prevState != OPEN) {
-            throw new IllegalStateException("Session is acquired by " + prevState + " clients");
+        int acquireCount = (int) ACQUIRE_COUNT.compareAndExchange(this, 0, CLOSED_ACQUIRE_COUNT);
+        if (acquireCount < 0) {
+            throw sharedSessionAlreadyClosed();
+        } else if (acquireCount > 0) {
+            throw alreadyAcquired(acquireCount);
         }
-        boolean success = SCOPED_MEMORY_ACCESS.closeScope(this);
-        STATE.setVolatile(this, success ? CLOSED : OPEN);
-        if (!success) {
-            throw new IllegalStateException("Session is acquired by 1 client");
-        }
+
+        STATE.setVolatile(this, CLOSED);
+        SCOPED_MEMORY_ACCESS.closeScope(this, ALREADY_CLOSED);
     }
 
-    @Override
-    public boolean isAlive() {
-        return (int) STATE.getVolatile(this) != CLOSED;
+    private IllegalStateException sharedSessionAlreadyClosed() {
+        // To avoid the situation where a scope fails to be acquired or closed but still reports as
+        // alive afterward, we wait for the state to change before throwing the exception
+        while ((int) STATE.getVolatile(this) == OPEN) {
+            Thread.onSpinWait();
+        }
+        return alreadyClosed();
     }
 
     /**
@@ -101,15 +105,8 @@ class SharedSession extends MemorySessionImpl {
      */
     static class SharedResourceList extends ResourceList {
 
-        static final VarHandle FST;
-
-        static {
-            try {
-                FST = MethodHandles.lookup().findVarHandle(ResourceList.class, "fst", ResourceCleanup.class);
-            } catch (Throwable ex) {
-                throw new ExceptionInInitializerError();
-            }
-        }
+        static final VarHandle FST = MhUtil.findVarHandle(
+                MethodHandles.lookup(), ResourceList.class, "fst", ResourceCleanup.class);
 
         @Override
         void add(ResourceCleanup cleanup) {
@@ -117,7 +114,7 @@ class SharedSession extends MemorySessionImpl {
                 ResourceCleanup prev = (ResourceCleanup) FST.getVolatile(this);
                 if (prev == ResourceCleanup.CLOSED_LIST) {
                     // too late
-                    throw new IllegalStateException("Already closed");
+                    throw alreadyClosed();
                 }
                 cleanup.next = prev;
                 if (FST.compareAndSet(this, prev, cleanup)) {
@@ -144,7 +141,7 @@ class SharedSession extends MemorySessionImpl {
                 }
                 cleanup(prev);
             } else {
-                throw new IllegalStateException("Attempt to cleanup an already closed resource list");
+                throw alreadyClosed();
             }
         }
     }

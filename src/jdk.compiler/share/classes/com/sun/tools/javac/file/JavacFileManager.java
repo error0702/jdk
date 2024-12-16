@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -54,14 +54,12 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.ZipException;
 
@@ -157,6 +155,7 @@ public class JavacFileManager extends BaseFileManager implements StandardJavaFil
      * Create a JavacFileManager using a given context, optionally registering
      * it as the JavaFileManager for that context.
      */
+    @SuppressWarnings("this-escape")
     public JavacFileManager(Context context, boolean register, Charset charset) {
         super(charset);
         if (register)
@@ -192,7 +191,7 @@ public class JavacFileManager extends BaseFileManager implements StandardJavaFil
     }
 
     /**
-     * Set whether or not to use ct.sym as an alternate to rt.jar.
+     * Set whether or not to use ct.sym as an alternate to the current runtime.
      */
     public void setSymbolFileEnabled(boolean b) {
         symbolFileEnabled = b;
@@ -326,7 +325,7 @@ public class JavacFileManager extends BaseFileManager implements StandardJavaFil
             } else {
                 try {
                     fs = new ArchiveContainer(path);
-                } catch (ProviderNotFoundException | SecurityException ex) {
+                } catch (ProviderNotFoundException ex) {
                     throw new IOException(ex);
                 }
             }
@@ -555,7 +554,7 @@ public class JavacFileManager extends BaseFileManager implements StandardJavaFil
         private final FileSystem fileSystem;
         private final Map<RelativeDirectory, Path> packages;
 
-        public ArchiveContainer(Path archivePath) throws IOException, ProviderNotFoundException, SecurityException {
+        public ArchiveContainer(Path archivePath) throws IOException, ProviderNotFoundException {
             this.archivePath = archivePath;
             if (multiReleaseValue != null && archivePath.toString().endsWith(".jar")) {
                 Map<String,String> env = Collections.singletonMap("multi-release", multiReleaseValue);
@@ -564,7 +563,7 @@ public class JavacFileManager extends BaseFileManager implements StandardJavaFil
                 try {
                     this.fileSystem = jarFSProvider.newFileSystem(archivePath, env);
                 } catch (ZipException ze) {
-                    throw new IOException("ZipException opening \"" + archivePath + "\": " + ze.getMessage(), ze);
+                    throw new IOException("ZipException opening \"" + archivePath.getFileName() + "\": " + ze.getMessage(), ze);
                 }
             } else {
                 this.fileSystem = FileSystems.newFileSystem(archivePath, (ClassLoader)null);
@@ -737,6 +736,7 @@ public class JavacFileManager extends BaseFileManager implements StandardJavaFil
         pathsAndContainersByLocationAndRelativeDirectory.clear();
         nonIndexingContainersByLocation.clear();
         contentCache.clear();
+        resetOutputFilesWritten();
     }
 
     @Override @DefinedBy(Api.COMPILER)

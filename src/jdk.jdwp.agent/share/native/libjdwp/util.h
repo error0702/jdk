@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1998, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -85,10 +85,12 @@ typedef struct {
     jboolean assertOn;
     jboolean assertFatal;
     jboolean vthreadsSupported; /* If true, debugging support for vthreads is enabled. */
-    jboolean enumerateVThreads; /* If true, JDWP APIs return vthreads in thread lists. */
+    jboolean includeVThreads;   /* If true, VM.AllThreads includes vthreads. */
+    jboolean rememberVThreadsWhenDisconnected;
     jboolean doerrorexit;
     jboolean modifiedUtf8;
     jboolean quiet;
+    jboolean jvmti_data_dump; /* If true, then support JVMTI DATA_DUMP_REQUEST events. */
 
     /* Debug flags (bit mask) */
     int      debugflags;
@@ -106,7 +108,6 @@ typedef struct {
     jclass              systemClass;
     jmethodID           threadConstructor;
     jmethodID           threadSetDaemon;
-    jmethodID           threadResume;
     jmethodID           systemGetProperty;
     jmethodID           setProperty;
     jthreadGroup        systemThreadGroup;
@@ -160,7 +161,7 @@ typedef enum {
         EI_THREAD_START         =  5,
         EI_THREAD_END           =  6,
         EI_CLASS_PREPARE        =  7,
-        EI_GC_FINISH            =  8,
+        EI_CLASS_UNLOAD         =  8,
         EI_CLASS_LOAD           =  9,
         EI_FIELD_ACCESS         = 10,
         EI_FIELD_MODIFICATION   = 11,
@@ -354,7 +355,6 @@ jrawMonitorID debugMonitorCreate(char *name);
 void debugMonitorEnter(jrawMonitorID theLock);
 void debugMonitorExit(jrawMonitorID theLock);
 void debugMonitorWait(jrawMonitorID theLock);
-void debugMonitorTimedWait(jrawMonitorID theLock, jlong millis);
 void debugMonitorNotify(jrawMonitorID theLock);
 void debugMonitorNotifyAll(jrawMonitorID theLock);
 void debugMonitorDestroy(jrawMonitorID theLock);
@@ -386,13 +386,20 @@ jvmtiError allNestedClasses(jclass clazz, jclass **ppnested, jint *pcount);
 
 void setAgentPropertyValue(JNIEnv *env, char *propertyName, char* propertyValue);
 
+#ifdef DEBUG
+// APIs that can be called when debugging the debug agent
+char* translateThreadState(jint flags);
+char* getThreadName(jthread thread);
+char* getMethodName(jmethodID method);
+void printStackTrace(jthread thread);
+void printThreadInfo(jthread thread);
+#endif
+
 void *jvmtiAllocate(jint numBytes);
 void jvmtiDeallocate(void *buffer);
 
 void             eventIndexInit(void);
-#ifdef DEBUG
 char*            eventIndex2EventName(EventIndex ei);
-#endif
 jdwpEvent        eventIndex2jdwp(EventIndex i);
 jvmtiEvent       eventIndex2jvmti(EventIndex i);
 EventIndex       jdwp2EventIndex(jdwpEvent eventType);

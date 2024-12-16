@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -57,7 +57,6 @@ import jdk.internal.ref.CleanerFactory;
 import sun.net.ConnectionResetException;
 import sun.net.NetHooks;
 import sun.net.PlatformSocketImpl;
-import sun.net.ResourceManager;
 import sun.net.ext.ExtendedSocketOptions;
 import sun.net.util.SocketExceptions;
 
@@ -182,6 +181,11 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
                 millis = -1;
             } else {
                 millis = NANOSECONDS.toMillis(nanos);
+                if (nanos > MILLISECONDS.toNanos(millis)) {
+                    // Round up any excess nanos to the nearest millisecond to
+                    // avoid parking for less than requested.
+                    millis++;
+                }
             }
             Net.poll(fd, event, millis);
         }
@@ -312,7 +316,8 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
             connectionReset = true;
             throw new SocketException("Connection reset");
         } catch (IOException ioe) {
-            throw new SocketException(ioe.getMessage());
+            // throw SocketException to maintain compatibility
+            throw asSocketException(ioe);
         } finally {
             endRead(n > 0);
         }
@@ -410,7 +415,8 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
         } catch (InterruptedIOException e) {
             throw e;
         } catch (IOException ioe) {
-            throw new SocketException(ioe.getMessage());
+            // throw SocketException to maintain compatibility
+            throw asSocketException(ioe);
         } finally {
             endWrite(n > 0);
         }
@@ -448,20 +454,12 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
         synchronized (stateLock) {
             if (state != ST_NEW)
                 throw new IOException("Already created");
-            if (!stream)
-                ResourceManager.beforeUdpCreate();
             FileDescriptor fd;
-            try {
-                if (server) {
-                    assert stream;
-                    fd = Net.serverSocket(true);
-                } else {
-                    fd = Net.socket(stream);
-                }
-            } catch (IOException ioe) {
-                if (!stream)
-                    ResourceManager.afterUdpClose();
-                throw ioe;
+            if (server) {
+                assert stream;
+                fd = Net.serverSocket(true);
+            } else {
+                fd = Net.socket(stream);
             }
             Runnable closer = closerFor(fd, stream);
             this.fd = fd;
@@ -601,8 +599,11 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
             }
         } catch (IOException ioe) {
             close();
-            if (ioe instanceof InterruptedIOException) {
+            if (ioe instanceof SocketTimeoutException) {
                 throw ioe;
+            } else if (ioe instanceof InterruptedIOException) {
+                assert Thread.currentThread().isVirtual();
+                throw new SocketException("Closed by interrupt");
             } else {
                 throw SocketExceptions.of(ioe, isa);
             }
@@ -955,8 +956,8 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
         synchronized (stateLock) {
             ensureOpen();
             if (opt == StandardSocketOptions.IP_TOS) {
-                // maps to IP_TOS or IPV6_TCLASS
-                Net.setSocketOption(fd, family(), opt, value);
+                // maps to IPV6_TCLASS and/or IP_TOS
+                Net.setIpSocketOption(fd, family(), opt, value);
             } else if (opt == StandardSocketOptions.SO_REUSEADDR) {
                 boolean b = (boolean) value;
                 if (Net.useExclusiveBind()) {
@@ -1030,7 +1031,7 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
                 }
                 case IP_TOS: {
                     int i = intValue(value, "IP_TOS");
-                    Net.setSocketOption(fd, family(), StandardSocketOptions.IP_TOS, i);
+                    Net.setIpSocketOption(fd, family(), StandardSocketOptions.IP_TOS, i);
                     break;
                 }
                 case TCP_NODELAY: {
@@ -1084,7 +1085,7 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
             } catch (SocketException e) {
                 throw e;
             } catch (IllegalArgumentException | IOException e) {
-                throw new SocketException(e.getMessage());
+                throw asSocketException(e);
             }
         }
     }
@@ -1136,7 +1137,7 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
             } catch (SocketException e) {
                 throw e;
             } catch (IllegalArgumentException | IOException e) {
-                throw new SocketException(e.getMessage());
+                throw asSocketException(e);
             }
         }
     }
@@ -1214,9 +1215,6 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
                     nd.close(fd);
                 } catch (IOException ioe) {
                     throw new UncheckedIOException(ioe);
-                } finally {
-                    // decrement
-                    ResourceManager.afterUdpClose();
                 }
             };
         }
@@ -1230,7 +1228,7 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
     private static long tryLock(ReentrantLock lock, long timeout, TimeUnit unit) {
         assert timeout > 0;
         boolean interrupted = false;
-        long nanos = NANOSECONDS.convert(timeout, unit);
+        long nanos = unit.toNanos(timeout);
         long remainingNanos = nanos;
         long startNanos = System.nanoTime();
         boolean acquired = false;
@@ -1247,6 +1245,19 @@ public final class NioSocketImpl extends SocketImpl implements PlatformSocketImp
         if (interrupted)
             Thread.currentThread().interrupt();
         return remainingNanos;
+    }
+
+    /**
+     * Creates a SocketException from the given exception.
+     */
+    private static SocketException asSocketException(Exception e) {
+        if (e instanceof SocketException se) {
+            return se;
+        } else {
+            var se = new SocketException(e.getMessage());
+            se.setStackTrace(e.getStackTrace());
+            return se;
+        }
     }
 
     /**

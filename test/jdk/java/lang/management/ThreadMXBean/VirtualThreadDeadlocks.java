@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2022, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -22,14 +22,25 @@
  */
 
 /**
- * @test
+ * @test id=default
  * @bug 8284161 8287103
  * @summary Test ThredMXBean.findMonitorDeadlockedThreads with cycles of
  *   platform and virtual threads in deadlock
- * @compile --enable-preview -source ${jdk.version} VirtualThreadDeadlocks.java
- * @run main/othervm --enable-preview VirtualThreadDeadlocks PP
- * @run main/othervm --enable-preview VirtualThreadDeadlocks PV
- * @run main/othervm --enable-preview VirtualThreadDeadlocks VV
+ * @modules java.management jdk.management
+ * @library /test/lib
+ * @run main/othervm VirtualThreadDeadlocks PP
+ * @run main/othervm VirtualThreadDeadlocks PV
+ * @run main/othervm VirtualThreadDeadlocks VV
+ */
+
+/**
+ * @test id=no-vmcontinuations
+ * @requires vm.continuations
+ * @modules java.management jdk.management
+ * @library /test/lib
+ * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:-VMContinuations VirtualThreadDeadlocks PP
+ * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:-VMContinuations VirtualThreadDeadlocks PV
+ * @run main/othervm -XX:+UnlockExperimentalVMOptions -XX:-VMContinuations VirtualThreadDeadlocks VV
  */
 
 import java.lang.management.ManagementFactory;
@@ -37,6 +48,7 @@ import java.lang.management.ThreadMXBean;
 import java.util.Arrays;
 import java.util.concurrent.CyclicBarrier;
 import java.util.stream.Stream;
+import jdk.test.lib.thread.VThreadRunner;   // ensureParallelism requires jdk.management
 
 public class VirtualThreadDeadlocks {
     private static final Object LOCK1 = new Object();
@@ -50,6 +62,8 @@ public class VirtualThreadDeadlocks {
      * VV = test deadlock with two virtual threads
      */
     public static void main(String[] args) throws Exception {
+        // need at least two carrier threads due to pinning
+        VThreadRunner.ensureParallelism(2);
 
         // start thread1
         Thread.Builder builder1 = (args[0].charAt(0) == 'P')

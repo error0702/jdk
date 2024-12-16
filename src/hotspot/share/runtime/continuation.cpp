@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -23,12 +23,19 @@
  */
 
 #include "precompiled.hpp"
-#include "runtime/arguments.hpp"
+#include "classfile/vmSymbols.hpp"
+#include "gc/shared/barrierSetNMethod.hpp"
+#include "oops/method.inline.hpp"
+#include "oops/oop.inline.hpp"
+#include "prims/jvmtiThreadState.inline.hpp"
 #include "runtime/continuation.hpp"
 #include "runtime/continuationEntry.inline.hpp"
 #include "runtime/continuationHelper.inline.hpp"
+#include "runtime/continuationJavaClasses.inline.hpp"
 #include "runtime/continuationWrapper.inline.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
+#include "runtime/javaThread.inline.hpp"
+#include "runtime/jniHandles.inline.hpp"
 #include "runtime/osThread.hpp"
 #include "runtime/vframe.inline.hpp"
 #include "runtime/vframe_hp.hpp"
@@ -50,21 +57,117 @@ JVM_ENTRY(void, CONT_unpin(JNIEnv* env, jclass cls)) {
 }
 JVM_END
 
+#if INCLUDE_JVMTI
+class JvmtiUnmountBeginMark : public StackObj {
+  Handle _vthread;
+  JavaThread* _target;
+  freeze_result _result;
+  bool _failed;
+
+ public:
+  JvmtiUnmountBeginMark(JavaThread* t) :
+    _vthread(t, t->vthread()), _target(t), _result(freeze_pinned_native), _failed(false) {
+    assert(!_target->is_in_VTMS_transition(), "must be");
+
+    if (JvmtiVTMSTransitionDisabler::VTMS_notify_jvmti_events()) {
+      JvmtiVTMSTransitionDisabler::VTMS_vthread_unmount((jthread)_vthread.raw_value(), true);
+
+      // Don't preempt if there is a pending popframe or earlyret operation. This can
+      // be installed in start_VTMS_transition() so we need to check it here.
+      if (JvmtiExport::can_pop_frame() || JvmtiExport::can_force_early_return()) {
+        JvmtiThreadState* state = _target->jvmti_thread_state();
+        if (_target->has_pending_popframe() || (state != nullptr && state->is_earlyret_pending())) {
+          _failed = true;
+        }
+      }
+
+      // Don't preempt in case there is an async exception installed since
+      // we would incorrectly throw it during the unmount logic in the carrier.
+      if (_target->has_async_exception_condition()) {
+        _failed = true;
+      }
+    } else {
+      _target->set_is_in_VTMS_transition(true);
+      java_lang_Thread::set_is_in_VTMS_transition(_vthread(), true);
+    }
+  }
+  ~JvmtiUnmountBeginMark() {
+    assert(!_target->is_suspended(), "must be");
+
+    assert(_target->is_in_VTMS_transition(), "must be");
+    assert(java_lang_Thread::is_in_VTMS_transition(_vthread()), "must be");
+
+    // Read it again since for late binding agents the flag could have
+    // been set while blocked in the allocation path during freeze.
+    bool jvmti_present = JvmtiVTMSTransitionDisabler::VTMS_notify_jvmti_events();
+
+    if (_result != freeze_ok) {
+      // Undo transition
+      if (jvmti_present) {
+        JvmtiVTMSTransitionDisabler::VTMS_vthread_mount((jthread)_vthread.raw_value(), false);
+      } else {
+        _target->set_is_in_VTMS_transition(false);
+        java_lang_Thread::set_is_in_VTMS_transition(_vthread(), false);
+      }
+    }
+  }
+  void set_result(freeze_result res) { _result = res; }
+  bool failed() { return _failed; }
+};
+
+static bool is_vthread_safe_to_preempt_for_jvmti(JavaThread* target) {
+  if (target->is_in_VTMS_transition()) {
+    // We caught target at the end of a mount transition.
+    return false;
+  }
+  return true;
+}
+#endif // INCLUDE_JVMTI
+
+static bool is_vthread_safe_to_preempt(JavaThread* target, oop vthread) {
+  assert(java_lang_VirtualThread::is_instance(vthread), "");
+  if (java_lang_VirtualThread::state(vthread) != java_lang_VirtualThread::RUNNING) {  // inside transition
+    return false;
+  }
+  return JVMTI_ONLY(is_vthread_safe_to_preempt_for_jvmti(target)) NOT_JVMTI(true);
+}
+
+typedef freeze_result (*FreezeContFnT)(JavaThread*, intptr_t*);
+
+static void verify_preempt_preconditions(JavaThread* target, oop continuation) {
+  assert(target == JavaThread::current(), "no support for external preemption");
+  assert(target->has_last_Java_frame(), "");
+  assert(!target->preempting(), "");
+  assert(target->last_continuation() != nullptr, "");
+  assert(target->last_continuation()->cont_oop(target) == continuation, "");
+  assert(Continuation::continuation_scope(continuation) == java_lang_VirtualThread::vthread_scope(), "");
+  assert(!target->has_pending_exception(), "");
+}
+
+freeze_result Continuation::try_preempt(JavaThread* target, oop continuation) {
+  verify_preempt_preconditions(target, continuation);
+
+  if (LockingMode == LM_LEGACY) {
+    return freeze_unsupported;
+  }
+
+  if (!is_vthread_safe_to_preempt(target, target->vthread())) {
+    return freeze_pinned_native;
+  }
+
+  JVMTI_ONLY(JvmtiUnmountBeginMark jubm(target);)
+  JVMTI_ONLY(if (jubm.failed()) return freeze_pinned_native;)
+  freeze_result res = CAST_TO_FN_PTR(FreezeContFnT, freeze_preempt_entry())(target, target->last_Java_sp());
+  log_trace(continuations, preempt)("try_preempt: %d", res);
+  JVMTI_ONLY(jubm.set_result(res);)
+  return res;
+}
+
 #ifndef PRODUCT
 static jlong java_tid(JavaThread* thread) {
   return java_lang_Thread::thread_id(thread->threadObj());
 }
 #endif
-
-const ContinuationEntry* Continuation::last_continuation(const JavaThread* thread, oop cont_scope) {
-  // guarantee (thread->has_last_Java_frame(), "");
-  for (ContinuationEntry* entry = thread->last_continuation(); entry != nullptr; entry = entry->parent()) {
-    if (cont_scope == jdk_internal_vm_Continuation::scope(entry->cont_oop())) {
-      return entry;
-    }
-  }
-  return nullptr;
-}
 
 ContinuationEntry* Continuation::get_continuation_entry_for_continuation(JavaThread* thread, oop continuation) {
   if (thread == nullptr || continuation == nullptr) {
@@ -72,7 +175,7 @@ ContinuationEntry* Continuation::get_continuation_entry_for_continuation(JavaThr
   }
 
   for (ContinuationEntry* entry = thread->last_continuation(); entry != nullptr; entry = entry->parent()) {
-    if (continuation == entry->cont_oop()) {
+    if (continuation == entry->cont_oop(thread)) {
       return entry;
     }
   }
@@ -94,10 +197,6 @@ bool Continuation::is_continuation_mounted(JavaThread* thread, oop continuation)
   return is_on_stack(thread, get_continuation_entry_for_continuation(thread, continuation));
 }
 
-bool Continuation::is_continuation_scope_mounted(JavaThread* thread, oop cont_scope) {
-  return is_on_stack(thread, last_continuation(thread, cont_scope));
-}
-
 // When walking the virtual stack, this method returns true
 // iff the frame is a thawed continuation frame whose
 // caller is still frozen on the h-stack.
@@ -115,10 +214,10 @@ bool Continuation::is_return_barrier_entry(const address pc) {
 }
 
 bool Continuation::is_continuation_enterSpecial(const frame& f) {
-  if (f.cb() == nullptr || !f.cb()->is_compiled()) {
+  if (f.cb() == nullptr || !f.cb()->is_nmethod()) {
     return false;
   }
-  Method* m = f.cb()->as_compiled_method()->method();
+  Method* m = f.cb()->as_nmethod()->method();
   return (m != nullptr && m->is_continuation_enter_intrinsic());
 }
 
@@ -130,12 +229,17 @@ bool Continuation::is_continuation_entry_frame(const frame& f, const RegisterMap
   return m != nullptr && m->intrinsic_id() == vmIntrinsics::_Continuation_enter;
 }
 
+// The parameter `sp` should be the actual sp and not the unextended sp because at
+// least on PPC64 unextended_sp < sp is possible as interpreted frames are trimmed
+// to the actual size of the expression stack before calls. The problem there is
+// that even unextended_sp < entry_sp < sp is possible for an interpreted frame.
 static inline bool is_sp_in_continuation(const ContinuationEntry* entry, intptr_t* const sp) {
+  // entry_sp() returns the unextended_sp which is always greater or equal to the actual sp
   return entry->entry_sp() > sp;
 }
 
 bool Continuation::is_frame_in_continuation(const ContinuationEntry* entry, const frame& f) {
-  return is_sp_in_continuation(entry, f.unextended_sp());
+  return is_sp_in_continuation(entry, f.sp());
 }
 
 ContinuationEntry* Continuation::get_continuation_entry_for_sp(JavaThread* thread, intptr_t* const sp) {
@@ -147,8 +251,15 @@ ContinuationEntry* Continuation::get_continuation_entry_for_sp(JavaThread* threa
   return entry;
 }
 
+ContinuationEntry* Continuation::get_continuation_entry_for_entry_frame(JavaThread* thread, const frame& f) {
+  assert(is_continuation_enterSpecial(f), "");
+  ContinuationEntry* entry = (ContinuationEntry*)f.unextended_sp();
+  assert(entry == get_continuation_entry_for_sp(thread, f.sp()-2), "mismatched entry");
+  return entry;
+}
+
 bool Continuation::is_frame_in_continuation(JavaThread* thread, const frame& f) {
-  return f.is_heap_frame() || (get_continuation_entry_for_sp(thread, f.unextended_sp()) != nullptr);
+  return f.is_heap_frame() || (get_continuation_entry_for_sp(thread, f.sp()) != nullptr);
 }
 
 static frame continuation_top_frame(const ContinuationWrapper& cont, RegisterMap* map) {
@@ -176,7 +287,7 @@ frame Continuation::top_frame(const frame& callee, RegisterMap* map) {
   assert(map != nullptr, "");
   ContinuationEntry* ce = get_continuation_entry_for_sp(map->thread(), callee.sp());
   assert(ce != nullptr, "");
-  oop continuation = ce->cont_oop();
+  oop continuation = ce->cont_oop(map->thread());
   ContinuationWrapper cont(continuation);
   return continuation_top_frame(cont, map);
 }
@@ -222,7 +333,7 @@ frame Continuation::continuation_parent_frame(RegisterMap* map) {
 
   map->set_stack_chunk(nullptr);
 
-#if (defined(X86) || defined(AARCH64)) && !defined(ZERO)
+#if (defined(X86) || defined(AARCH64) || defined(RISCV64) || defined(PPC64)) && !defined(ZERO)
   frame sender(cont.entrySP(), cont.entryFP(), cont.entryPC());
 #else
   frame sender = frame();
@@ -249,7 +360,7 @@ bool Continuation::is_scope_bottom(oop cont_scope, const frame& f, const Registe
     if (ce == nullptr) {
       return false;
     }
-    continuation = ce->cont_oop();
+    continuation = ce->cont_oop(map->thread());
   }
   if (continuation == nullptr) {
     return false;
@@ -284,9 +395,8 @@ bool Continuation::unpin(JavaThread* current) {
 
 frame Continuation::continuation_bottom_sender(JavaThread* thread, const frame& callee, intptr_t* sender_sp) {
   assert (thread != nullptr, "");
-  ContinuationEntry* ce = get_continuation_entry_for_sp(thread,
-        callee.is_interpreted_frame() ? callee.interpreter_frame_last_sp() : callee.unextended_sp());
-  assert(ce != nullptr, "callee.unextended_sp(): " INTPTR_FORMAT, p2i(callee.unextended_sp()));
+  ContinuationEntry* ce = get_continuation_entry_for_sp(thread, callee.sp());
+  assert(ce != nullptr, "callee.sp(): " INTPTR_FORMAT, p2i(callee.sp()));
 
   log_develop_debug(continuations)("continuation_bottom_sender: [" JLONG_FORMAT "] [%d] callee: " INTPTR_FORMAT
     " sender_sp: " INTPTR_FORMAT,
@@ -409,51 +519,8 @@ void Continuations::init() {
   Continuation::init();
 }
 
-// While virtual threads are in Preview, there are some VM mechanisms we disable if continuations aren't used
-// See NMethodSweeper::do_stack_scanning and nmethod::is_not_on_continuation_stack
 bool Continuations::enabled() {
-  return Arguments::enable_preview();
-}
-
-// We initialize the _gc_epoch to 2, because previous_completed_gc_marking_cycle
-// subtracts the value by 2, and the type is unsigned. We don't want underflow.
-//
-// Odd values mean that marking is in progress, and even values mean that no
-// marking is currently active.
-uint64_t Continuations::_gc_epoch = 2;
-
-uint64_t Continuations::gc_epoch() {
-  return _gc_epoch;
-}
-
-bool Continuations::is_gc_marking_cycle_active() {
-  // Odd means that marking is active
-  return (_gc_epoch % 2) == 1;
-}
-
-uint64_t Continuations::previous_completed_gc_marking_cycle() {
-  if (is_gc_marking_cycle_active()) {
-    return _gc_epoch - 2;
-  } else {
-    return _gc_epoch - 1;
-  }
-}
-
-void Continuations::on_gc_marking_cycle_start() {
-  assert(!is_gc_marking_cycle_active(), "Previous marking cycle never ended");
-  ++_gc_epoch;
-}
-
-void Continuations::on_gc_marking_cycle_finish() {
-  assert(is_gc_marking_cycle_active(), "Marking cycle started before last one finished");
-  ++_gc_epoch;
-}
-
-void Continuations::arm_all_nmethods() {
-  BarrierSetNMethod* bs_nm = BarrierSet::barrier_set()->barrier_set_nmethod();
-  if (bs_nm != NULL) {
-    bs_nm->arm_all_nmethods();
-  }
+  return VMContinuations;
 }
 
 #define CC (char*)  /*cast a literal from (const char*)*/
@@ -466,10 +533,9 @@ static JNINativeMethod CONT_methods[] = {
 };
 
 void CONT_RegisterNativeMethods(JNIEnv *env, jclass cls) {
-    Thread* thread = Thread::current();
-    assert(thread->is_Java_thread(), "");
-    ThreadToNativeFromVM trans((JavaThread*)thread);
+    JavaThread* thread = JavaThread::current();
+    ThreadToNativeFromVM trans(thread);
     int status = env->RegisterNatives(cls, CONT_methods, sizeof(CONT_methods)/sizeof(JNINativeMethod));
     guarantee(status == JNI_OK, "register jdk.internal.vm.Continuation natives");
-    guarantee(!env->ExceptionOccurred(), "register jdk.internal.vm.Continuation natives");
+    guarantee(!env->ExceptionCheck(), "register jdk.internal.vm.Continuation natives");
 }

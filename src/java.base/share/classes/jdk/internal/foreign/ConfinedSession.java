@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -27,8 +27,8 @@ package jdk.internal.foreign;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
-import java.lang.ref.Cleaner;
 
+import jdk.internal.invoke.MhUtil;
 import jdk.internal.vm.annotation.ForceInline;
 
 /**
@@ -41,40 +41,27 @@ final class ConfinedSession extends MemorySessionImpl {
 
     private int asyncReleaseCount = 0;
 
-    static final VarHandle ASYNC_RELEASE_COUNT;
+    static final VarHandle ASYNC_RELEASE_COUNT= MhUtil.findVarHandle(MethodHandles.lookup(), "asyncReleaseCount", int.class);
 
-    static {
-        try {
-            ASYNC_RELEASE_COUNT = MethodHandles.lookup().findVarHandle(ConfinedSession.class, "asyncReleaseCount", int.class);
-        } catch (Throwable ex) {
-            throw new ExceptionInInitializerError(ex);
-        }
-    }
-
-    public ConfinedSession(Thread owner, Cleaner cleaner) {
-        super(owner, new ConfinedResourceList(), cleaner);
-    }
-
-    @Override
-    public boolean isAlive() {
-        return state != CLOSED;
+    public ConfinedSession(Thread owner) {
+        super(owner, new ConfinedResourceList());
     }
 
     @Override
     @ForceInline
     public void acquire0() {
-        checkValidStateSlow();
-        if (state == MAX_FORKS) {
-            throw new IllegalStateException("Session keep alive limit exceeded");
+        checkValidState();
+        if (acquireCount == MAX_FORKS) {
+            throw tooManyAcquires();
         }
-        state++;
+        acquireCount++;
     }
 
     @Override
     @ForceInline
     public void release0() {
         if (Thread.currentThread() == owner) {
-            state--;
+            acquireCount--;
         } else {
             // It is possible to end up here in two cases: this session was kept alive by some other confined session
             // which is implicitly released (in which case the release call comes from the cleaner thread). Or,
@@ -85,11 +72,13 @@ final class ConfinedSession extends MemorySessionImpl {
     }
 
     void justClose() {
-        checkValidStateSlow();
-        if (state == 0 || state - ((int)ASYNC_RELEASE_COUNT.getVolatile(this)) == 0) {
+        checkValidState();
+        int asyncCount = (int)ASYNC_RELEASE_COUNT.getVolatile(this);
+        int acquire = acquireCount - asyncCount;
+        if (acquire == 0) {
             state = CLOSED;
         } else {
-            throw new IllegalStateException("Session is acquired by " + state + " clients");
+            throw alreadyAcquired(acquire);
         }
     }
 
@@ -103,7 +92,7 @@ final class ConfinedSession extends MemorySessionImpl {
                 cleanup.next = fst;
                 fst = cleanup;
             } else {
-                throw new IllegalStateException("Already closed!");
+                throw alreadyClosed();
             }
         }
 
@@ -114,7 +103,7 @@ final class ConfinedSession extends MemorySessionImpl {
                 fst = ResourceCleanup.CLOSED_LIST;
                 cleanup(prev);
             } else {
-                throw new IllegalStateException("Attempt to cleanup an already closed resource list");
+                throw alreadyClosed();
             }
         }
     }

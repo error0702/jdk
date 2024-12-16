@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2016, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -77,9 +77,6 @@ public final class RecordingFile implements Closeable {
      * @throws IOException if it's not a valid recording file, or an I/O error
      *         occurred
      * @throws NoSuchFileException if the {@code file} can't be located
-     *
-     * @throws SecurityException if a security manager exists and its
-     *         {@code checkRead} method denies read access to the file.
      */
     public RecordingFile(Path file) throws IOException {
         Objects.requireNonNull(file, "file");
@@ -163,8 +160,8 @@ public final class RecordingFile implements Closeable {
     List<Type> readTypes() throws IOException  {
         ensureOpen();
         MetadataDescriptor previous = null;
-        List<Type> types = new ArrayList<>();
-        HashSet<Long> foundIds = new HashSet<>();
+        List<Type> types = new ArrayList<>(200);
+        HashSet<Long> foundIds = HashSet.newHashSet(types.size());
         try (RecordingInput ri = new RecordingInput(file, FileAccess.UNPRIVILEGED)) {
             ChunkHeader ch = new ChunkHeader(ri);
             ch.awaitFinished();
@@ -228,10 +225,6 @@ public final class RecordingFile implements Closeable {
      *                           Recorder file or a version of a JFR file that can't
      *                           be parsed
      *
-     * @throws SecurityException if a security manager exists and its
-     *                           {@code checkWrite} method denies write access to the
-     *                           file
-     *
      * @since 19
      */
     public void write(Path destination, Predicate<RecordedEvent> filter) throws IOException {
@@ -262,11 +255,9 @@ public final class RecordingFile implements Closeable {
      *
      * @throws IOException if an I/O error occurred, it's not a Flight Recorder
      *         file or a version of a JFR file that can't be parsed
-     *
-     * @throws SecurityException if a security manager exists and its
-     *         {@code checkRead} method denies read access to the file.
      */
     public static List<RecordedEvent> readAllEvents(Path path) throws IOException {
+        Objects.requireNonNull(path, "path");
         try (RecordingFile r = new RecordingFile(path)) {
             List<RecordedEvent> list = new ArrayList<>();
             while (r.hasMoreEvents()) {

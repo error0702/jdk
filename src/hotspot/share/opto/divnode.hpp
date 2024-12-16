@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -171,6 +171,7 @@ public:
   virtual Node *Ideal(PhaseGVN *phase, bool can_reshape);
   virtual const Type *bottom_type() const { return TypeInt::INT; }
   virtual uint ideal_reg() const { return Op_RegI; }
+  virtual const Type* Value(PhaseGVN* phase) const;
 };
 
 //------------------------------UModLNode---------------------------------------
@@ -182,6 +183,7 @@ public:
   virtual Node *Ideal(PhaseGVN *phase, bool can_reshape);
   virtual const Type *bottom_type() const { return TypeLong::LONG; }
   virtual uint ideal_reg() const { return Op_RegL; }
+  virtual const Type* Value(PhaseGVN* phase) const;
 };
 
 //------------------------------DivModNode---------------------------------------
@@ -196,11 +198,13 @@ public:
   };
   virtual int Opcode() const;
   virtual Node* Identity(PhaseGVN* phase) { return this; }
-  virtual Node *Ideal(PhaseGVN *phase, bool can_reshape) { return NULL; }
+  virtual Node *Ideal(PhaseGVN *phase, bool can_reshape) { return nullptr; }
   virtual const Type* Value(PhaseGVN* phase)  const { return bottom_type(); }
   virtual uint hash() const { return Node::hash(); }
   virtual bool is_CFG() const  { return false; }
   virtual uint ideal_reg() const { return NotAMachineReg; }
+
+  static DivModNode* make(Node* div_or_mod, BasicType bt, bool is_unsigned);
 
   ProjNode* div_proj() { return proj_out_or_null(div_proj_num); }
   ProjNode* mod_proj() { return proj_out_or_null(mod_proj_num); }

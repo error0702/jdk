@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -25,8 +25,9 @@
 /**
  * @test
  * @summary Test JVMTI Monitor functions for virtual threads
- * @compile --enable-preview -source ${jdk.version} VThreadMonitorTest.java
- * @run main/othervm/native --enable-preview -agentlib:VThreadMonitorTest VThreadMonitorTest
+ * @requires vm.continuations
+ * @compile VThreadMonitorTest.java
+ * @run main/othervm/native -agentlib:VThreadMonitorTest VThreadMonitorTest
  */
 
 import java.io.PrintStream;
@@ -48,6 +49,7 @@ public class VThreadMonitorTest {
     }
     private static native boolean hasEventPosted();
     private static native void checkContendedMonitor(Thread thread, Object mon1, Object mon2);
+    private static native void checkOwnedMonitor(Thread thread, int expectedCount);
     private static native int check();
 
     private static void log(String str) { System.out.println(str); }
@@ -56,6 +58,7 @@ public class VThreadMonitorTest {
     private static final Object lock0 = new MonitorClass0();
     private static final Object lock1 = new Object();
     private static final Object lock2 = new MonitorClass2();
+    private static volatile Thread waiter;
 
     static void sleep(long millis) {
         try {
@@ -72,6 +75,12 @@ public class VThreadMonitorTest {
     static void m1() {
         synchronized (lock1) {
             // log(thrName() +" entered sync section with lock1");
+            if (waiter == null) {
+                try {
+                    waiter = Thread.currentThread();
+                    lock1.wait();
+                } catch (InterruptedException e) {}
+            }
             m0();
         }
     }
@@ -120,6 +129,13 @@ public class VThreadMonitorTest {
             for (int i = 0; i < VT_TOTAL; i++) {
                 vthreads[i].start();
             }
+            // Wait for waiter to enter lock1.
+            while (waiter == null) {}
+            synchronized (lock1) {
+                checkOwnedMonitor(waiter, 1);
+                lock1.notify();
+            }
+
             // Wait for the MonitorContendedEnter event.
             while (!hasEventPosted()) {
                 log("Main thread is waiting for event\n");

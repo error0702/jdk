@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2012, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -48,6 +48,7 @@ import static jdk.jpackage.internal.StandardBundlerParam.LICENSE_FILE;
 import static jdk.jpackage.internal.StandardBundlerParam.TEMP_ROOT;
 import static jdk.jpackage.internal.StandardBundlerParam.VERBOSE;
 import static jdk.jpackage.internal.StandardBundlerParam.DMG_CONTENT;
+import jdk.jpackage.internal.util.FileUtils;
 
 public class MacDmgBundler extends MacBaseInstallerBundler {
 
@@ -121,7 +122,7 @@ public class MacDmgBundler extends MacBaseInstallerBundler {
         Path bgFile = Path.of(rootPath.toString(), APP_NAME.fetchFrom(params),
                               BACKGROUND_IMAGE_FOLDER, BACKGROUND_IMAGE);
 
-        //prepare config for exe
+        // Prepare DMG setup script
         Map<String, String> data = new HashMap<>();
         data.put("DEPLOY_VOLUME_URL", volumeUrl);
         data.put("DEPLOY_BG_FILE", bgFile.toString());
@@ -131,6 +132,8 @@ public class MacDmgBundler extends MacBaseInstallerBundler {
               APP_NAME.fetchFrom(params) : appLocation.getFileName().toString();
         data.put("DEPLOY_TARGET", targetItem);
         data.put("DEPLOY_INSTALL_LOCATION", getInstallDir(params, true));
+        data.put("DEPLOY_INSTALL_LOCATION_DISPLAY_NAME",
+                getInstallDirDisplayName(params));
 
         createResource(DEFAULT_DMG_SETUP_SCRIPT, params)
                 .setCategory(I18N.getString("resource.dmg-setup-script"))
@@ -277,11 +280,8 @@ public class MacDmgBundler extends MacBaseInstallerBundler {
         Path finalDMG = outdir.resolve(MAC_INSTALLER_NAME.fetchFrom(params)
                 + INSTALLER_SUFFIX.fetchFrom(params) + ".dmg");
 
-        Path srcFolder = APP_IMAGE_TEMP_ROOT.fetchFrom(params);
-        Path predefinedImage = StandardBundlerParam.getPredefinedAppImage(params);
-        if (predefinedImage != null) {
-            srcFolder = predefinedImage;
-        } else if (StandardBundlerParam.isRuntimeInstaller(params)) {
+        Path srcFolder = appLocation.getParent();
+        if (StandardBundlerParam.isRuntimeInstaller(params)) {
             Path newRoot = Files.createTempDirectory(TEMP_ROOT.fetchFrom(params),
                     "root-");
 
@@ -295,7 +295,7 @@ public class MacDmgBundler extends MacBaseInstallerBundler {
                     MAC_CF_BUNDLE_IDENTIFIER.fetchFrom(params));
             Path dest = root.resolve("Contents/Home");
 
-            IOUtils.copyRecursive(source, dest);
+            FileUtils.copyRecursive(source, dest);
 
             srcFolder = newRoot;
         }
@@ -320,7 +320,7 @@ public class MacDmgBundler extends MacBaseInstallerBundler {
         List <String> dmgContent = DMG_CONTENT.fetchFrom(params);
         for (String content : dmgContent) {
             Path path = Path.of(content);
-            IOUtils.copyRecursive(path, srcFolder.resolve(path.getFileName()));
+            FileUtils.copyRecursive(path, srcFolder.resolve(path.getFileName()));
         }
         // create temp image
         ProcessBuilder pb = new ProcessBuilder(
@@ -382,9 +382,9 @@ public class MacDmgBundler extends MacBaseInstallerBundler {
                 Path destPath = mountedRoot
                         .resolve(srcFolder.getFileName());
                 Files.createDirectory(destPath);
-                IOUtils.copyRecursive(srcFolder, destPath);
+                FileUtils.copyRecursive(srcFolder, destPath);
             } else {
-                IOUtils.copyRecursive(srcFolder, mountedRoot);
+                FileUtils.copyRecursive(srcFolder, mountedRoot);
             }
         }
 

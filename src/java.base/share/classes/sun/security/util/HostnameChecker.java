@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2002, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -61,7 +61,7 @@ public class HostnameChecker {
     private static final int ALTNAME_DNS = 2;
     private static final int ALTNAME_IP  = 7;
 
-    // the algorithm to follow to perform the check. Currently unused.
+    // the algorithm to follow to perform the check. Currently, unused.
     private final byte checkType;
 
     private HostnameChecker(byte checkType) {
@@ -119,12 +119,8 @@ public class HostnameChecker {
      * Likewise for IP addresses when it returns false.
      */
     private static boolean isIpAddress(String name) {
-        if (IPAddressUtil.isIPv4LiteralAddress(name) ||
-            IPAddressUtil.isIPv6LiteralAddress(name)) {
-            return true;
-        } else {
-            return false;
-        }
+        return IPAddressUtil.isIPv4LiteralAddress(name) ||
+                IPAddressUtil.isIPv6LiteralAddress(name);
     }
 
     /**
@@ -157,7 +153,7 @@ public class HostnameChecker {
                                 InetAddress.getByName(ipAddress))) {
                             return;
                         }
-                    } catch (UnknownHostException | SecurityException e) {}
+                    } catch (UnknownHostException e) {}
                 }
             }
         }
@@ -288,7 +284,7 @@ public class HostnameChecker {
 
         // check the validity of the domain name template.
         try {
-            // Replacing wildcard character '*' with 'z' so as to check
+            // Replacing wildcard character '*' with 'z' to check
             // the domain name template validity.
             //
             // Using the checking implemented in SNIHostName
@@ -414,7 +410,7 @@ public class HostnameChecker {
             return name.equals(template);
 
         boolean isBeginning = true;
-        String beforeWildcard = "";
+        String beforeWildcard;
         String afterWildcard = template;
 
         while (wildcardIdx != -1) {

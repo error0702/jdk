@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
+ *  Copyright (c) 2019, 2024, Oracle and/or its affiliates. All rights reserved.
  *  DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  *  This code is free software; you can redistribute it and/or modify it
@@ -26,34 +26,41 @@
 
 package jdk.internal.foreign;
 
-import java.lang.foreign.MemoryAddress;
+import java.lang.foreign.AddressLayout;
 import java.lang.foreign.MemoryLayout;
+import java.lang.foreign.MemoryLayout.PathElement;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.SegmentAllocator;
+import java.lang.foreign.StructLayout;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.invoke.VarHandle;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
+
 import jdk.internal.access.SharedSecrets;
+import jdk.internal.foreign.abi.SharedUtils;
+import jdk.internal.misc.Unsafe;
 import jdk.internal.vm.annotation.ForceInline;
-import static java.lang.foreign.ValueLayout.JAVA_BYTE;
+import sun.invoke.util.Wrapper;
 
 /**
  * This class contains misc helper functions to support creation of memory segments.
  */
 public final class Utils {
+
+    // Suppresses default constructor, ensuring non-instantiability.
+    private Utils() {}
+
     private static final MethodHandle BYTE_TO_BOOL;
     private static final MethodHandle BOOL_TO_BYTE;
     private static final MethodHandle ADDRESS_TO_LONG;
-    private static final MethodHandle LONG_TO_ADDRESS;
-    public static final MethodHandle MH_bitsToBytesOrThrowForOffset;
-
-    public static final Supplier<RuntimeException> bitsToBytesThrowOffset
-        = () -> new UnsupportedOperationException("Cannot compute byte offset; bit offset is not a multiple of 8");
+    private static final MethodHandle LONG_TO_ADDRESS_TARGET;
+    private static final MethodHandle LONG_TO_ADDRESS_NO_TARGET;
 
     static {
         try {
@@ -62,15 +69,12 @@ public final class Utils {
                     MethodType.methodType(boolean.class, byte.class));
             BOOL_TO_BYTE = lookup.findStatic(Utils.class, "booleanToByte",
                     MethodType.methodType(byte.class, boolean.class));
-            ADDRESS_TO_LONG = lookup.findVirtual(MemoryAddress.class, "toRawLongValue",
-                    MethodType.methodType(long.class));
-            LONG_TO_ADDRESS = lookup.findStatic(MemoryAddress.class, "ofLong",
-                    MethodType.methodType(MemoryAddress.class, long.class));
-            MH_bitsToBytesOrThrowForOffset = MethodHandles.insertArguments(
-                lookup.findStatic(Utils.class, "bitsToBytesOrThrow",
-                    MethodType.methodType(long.class, long.class, Supplier.class)),
-                1,
-                bitsToBytesThrowOffset);
+            ADDRESS_TO_LONG = lookup.findStatic(SharedUtils.class, "unboxSegment",
+                    MethodType.methodType(long.class, MemorySegment.class));
+            LONG_TO_ADDRESS_TARGET = lookup.findStatic(Utils.class, "longToAddress",
+                    MethodType.methodType(MemorySegment.class, long.class, AddressLayout.class));
+            LONG_TO_ADDRESS_NO_TARGET = lookup.findStatic(Utils.class, "longToAddress",
+                    MethodType.methodType(MemorySegment.class, long.class));
         } catch (Throwable ex) {
             throw new ExceptionInInitializerError(ex);
         }
@@ -80,38 +84,38 @@ public final class Utils {
         return (n + alignment - 1) & -alignment;
     }
 
-    public static MemoryAddress alignUp(MemoryAddress ma, long alignment) {
-        long offset = ma.toRawLongValue();
-        return ma.addOffset(alignUp(offset, alignment) - offset);
-    }
-
     public static MemorySegment alignUp(MemorySegment ms, long alignment) {
-        long offset = ms.address().toRawLongValue();
+        long offset = ms.address();
         return ms.asSlice(alignUp(offset, alignment) - offset);
     }
 
-    public static long bitsToBytesOrThrow(long bits, Supplier<RuntimeException> exFactory) {
-        if (Utils.isAligned(bits, 8)) {
-            return bits / 8;
-        } else {
-            throw exFactory.get();
+    /**
+     * This method returns a <em>raw var handle</em>, that is, a var handle that does not perform any size
+     * or alignment checks. Such checks are added (using adaptation) by {@link LayoutPath#dereferenceHandle()}.
+     * <p>
+     * We provide two level of caching of the generated var handles. First, the var handle associated
+     * with a {@link ValueLayout#varHandle()} call is cached inside a stable field of the value layout implementation.
+     * This optimizes common code idioms like {@code JAVA_INT.varHandle().getInt(...)}. A second layer of caching
+     * is then provided by this method: after all, var handles constructed by {@link MemoryLayout#varHandle(PathElement...)}
+     * will be obtained by adapting some raw var handle generated by this method.
+     *
+     * @param layout the value layout for which a raw memory segment var handle is to be created.
+     * @return a raw memory segment var handle.
+     */
+    public static VarHandle makeRawSegmentViewVarHandle(ValueLayout layout) {
+        final class VarHandleCache {
+            private static final Map<ValueLayout, VarHandle> HANDLE_MAP = new ConcurrentHashMap<>();
         }
+        return VarHandleCache.HANDLE_MAP
+                .computeIfAbsent(layout.withoutName(), Utils::makeRawSegmentViewVarHandleInternal);
     }
 
-    public static VarHandle makeSegmentViewVarHandle(ValueLayout layout) {
-        class VarHandleCache {
-            private static final Map<ValueLayout, VarHandle> handleMap = new ConcurrentHashMap<>();
-
-            static VarHandle put(ValueLayout layout, VarHandle handle) {
-                VarHandle prev = handleMap.putIfAbsent(layout, handle);
-                return prev != null ? prev : handle;
-            }
-        }
+    private static VarHandle makeRawSegmentViewVarHandleInternal(ValueLayout layout) {
         Class<?> baseCarrier = layout.carrier();
-        if (layout.carrier() == MemoryAddress.class) {
+        if (layout.carrier() == MemorySegment.class) {
             baseCarrier = switch ((int) ValueLayout.ADDRESS.byteSize()) {
-                case 8 -> long.class;
-                case 4 -> int.class;
+                case Long.BYTES -> long.class;
+                case Integer.BYTES -> int.class;
                 default -> throw new UnsupportedOperationException("Unsupported address layout");
             };
         } else if (layout.carrier() == boolean.class) {
@@ -123,15 +127,16 @@ public final class Utils {
 
         if (layout.carrier() == boolean.class) {
             handle = MethodHandles.filterValue(handle, BOOL_TO_BYTE, BYTE_TO_BOOL);
-        } else if (layout.carrier() == MemoryAddress.class) {
-            handle = MethodHandles.filterValue(handle,
-                    MethodHandles.explicitCastArguments(ADDRESS_TO_LONG, MethodType.methodType(baseCarrier, MemoryAddress.class)),
-                    MethodHandles.explicitCastArguments(LONG_TO_ADDRESS, MethodType.methodType(MemoryAddress.class, baseCarrier)));
+        } else if (layout instanceof AddressLayout addressLayout) {
+            MethodHandle longToAddressAdapter = addressLayout.targetLayout().isPresent() ?
+                    MethodHandles.insertArguments(LONG_TO_ADDRESS_TARGET, 1, addressLayout) :
+                    LONG_TO_ADDRESS_NO_TARGET;
+            handle = MethodHandles.filterValue(handle, ADDRESS_TO_LONG, longToAddressAdapter);
         }
-        return VarHandleCache.put(layout, handle);
+        return handle;
     }
 
-    private static boolean byteToBoolean(byte b) {
+    public static boolean byteToBoolean(byte b) {
         return b != 0;
     }
 
@@ -139,16 +144,30 @@ public final class Utils {
         return b ? (byte)1 : (byte)0;
     }
 
-    public static void copy(MemorySegment addr, byte[] bytes) {
-        var heapSegment = MemorySegment.ofArray(bytes);
-        addr.copyFrom(heapSegment);
-        addr.set(JAVA_BYTE, bytes.length, (byte)0);
+    @ForceInline
+    public static MemorySegment longToAddress(long addr) {
+        return longToAddress(addr, 0, 1);
     }
 
-    public static MemorySegment toCString(byte[] bytes, SegmentAllocator allocator) {
-        MemorySegment addr = allocator.allocate(bytes.length + 1, 1L);
-        copy(addr, bytes);
-        return addr;
+    @ForceInline
+    public static MemorySegment longToAddress(long addr, AddressLayout layout) {
+        return longToAddress(addr, pointeeByteSize(layout), pointeeByteAlign(layout));
+    }
+
+    @ForceInline
+    public static MemorySegment longToAddress(long addr, long size, long align) {
+        if (!isAligned(addr, align)) {
+            throw new IllegalArgumentException("Invalid alignment constraint for address: " + toHexString(addr));
+        }
+        return SegmentFactories.makeNativeSegmentUnchecked(addr, size);
+    }
+
+    @ForceInline
+    public static MemorySegment longToAddress(long addr, long size, long align, MemorySessionImpl scope) {
+        if (!isAligned(addr, align)) {
+            throw new IllegalArgumentException("Invalid alignment constraint for address: " + toHexString(addr));
+        }
+        return SegmentFactories.makeNativeSegmentUnchecked(addr, size, scope);
     }
 
     @ForceInline
@@ -157,9 +176,158 @@ public final class Utils {
     }
 
     @ForceInline
-    public static void checkElementAlignment(MemoryLayout layout, String msg) {
-        if (layout.bitAlignment() > layout.bitSize()) {
+    public static boolean isElementAligned(ValueLayout layout) {
+        // Fast-path: if both size and alignment are powers of two, we can just
+        // check if one is greater than the other.
+        assert isPowerOfTwo(layout.byteSize());
+        return layout.byteAlignment() <= layout.byteSize();
+    }
+
+    @ForceInline
+    public static void checkElementAlignment(ValueLayout layout, String msg) {
+        if (!isElementAligned(layout)) {
             throw new IllegalArgumentException(msg);
         }
     }
+
+    @ForceInline
+    public static void checkElementAlignment(MemoryLayout layout, String msg) {
+        if (layout.byteSize() % layout.byteAlignment() != 0) {
+            throw new IllegalArgumentException(msg);
+        }
+    }
+
+    public static long pointeeByteSize(AddressLayout addressLayout) {
+        return addressLayout.targetLayout()
+                .map(MemoryLayout::byteSize)
+                .orElse(0L);
+    }
+
+    public static long pointeeByteAlign(AddressLayout addressLayout) {
+        return addressLayout.targetLayout()
+                .map(MemoryLayout::byteAlignment)
+                .orElse(1L);
+    }
+
+    public static void checkAllocationSizeAndAlign(long byteSize, long byteAlignment) {
+        // byteSize should be >= 0
+        Utils.checkNonNegativeArgument(byteSize, "allocation size");
+        checkAlign(byteAlignment);
+    }
+
+    public static void checkAlign(long byteAlignment) {
+        // alignment should be > 0, and power of two
+        if (byteAlignment <= 0 ||
+                ((byteAlignment & (byteAlignment - 1)) != 0L)) {
+            throw new IllegalArgumentException("Invalid alignment constraint : " + byteAlignment);
+        }
+    }
+
+    @ForceInline
+    public static void checkNonNegativeArgument(long value, String name) {
+        if (value < 0) {
+            throw new IllegalArgumentException("The provided " + name + " is negative: " + value);
+        }
+    }
+
+    @ForceInline
+    public static void checkNonNegativeIndex(long value, String name) {
+        if (value < 0) {
+            throw new IndexOutOfBoundsException("The provided " + name + " is negative: " + value);
+        }
+    }
+
+    private static long computePadding(long offset, long align) {
+        boolean isAligned = offset == 0 || offset % align == 0;
+        if (isAligned) {
+            return 0;
+        } else {
+            long gap = offset % align;
+            return align - gap;
+        }
+    }
+
+    /**
+     * {@return return a struct layout constructed from the given elements, with padding
+     * computed automatically so that they are naturally aligned}.
+     *
+     * @param elements the structs' fields
+     */
+    public static StructLayout computePaddedStructLayout(MemoryLayout... elements) {
+        long offset = 0L;
+        List<MemoryLayout> layouts = new ArrayList<>();
+        long align = 0;
+        for (MemoryLayout l : elements) {
+            long padding = computePadding(offset, l.byteAlignment());
+            if (padding != 0) {
+                layouts.add(MemoryLayout.paddingLayout(padding));
+                offset += padding;
+            }
+            layouts.add(l);
+            align = Math.max(align, l.byteAlignment());
+            offset += l.byteSize();
+        }
+        long padding = computePadding(offset, align);
+        if (padding != 0) {
+            layouts.add(MemoryLayout.paddingLayout(padding));
+        }
+        return MemoryLayout.structLayout(layouts.toArray(MemoryLayout[]::new));
+    }
+
+    public static int byteWidthOfPrimitive(Class<?> primitive) {
+        return Wrapper.forPrimitiveType(primitive).bitWidth() / 8;
+    }
+
+    public static boolean isPowerOfTwo(long value) {
+        return (value & (value - 1)) == 0L;
+    }
+
+    public static <L extends MemoryLayout> L wrapOverflow(Supplier<L> layoutSupplier) {
+        try {
+            return layoutSupplier.get();
+        } catch (ArithmeticException ex) {
+            throw new IllegalArgumentException("Layout size exceeds Long.MAX_VALUE");
+        }
+    }
+
+    public static boolean containsNullChars(String s) {
+        return s.indexOf('\u0000') >= 0;
+    }
+
+    public static String toHexString(long value) {
+        return "0x" + Long.toHexString(value);
+    }
+
+    public record BaseAndScale(int base, long scale) {
+
+        public static final BaseAndScale BYTE =
+                new BaseAndScale(Unsafe.ARRAY_BYTE_BASE_OFFSET, Unsafe.ARRAY_BYTE_INDEX_SCALE);
+        public static final BaseAndScale CHAR =
+                new BaseAndScale(Unsafe.ARRAY_CHAR_BASE_OFFSET, Unsafe.ARRAY_CHAR_INDEX_SCALE);
+        public static final BaseAndScale SHORT =
+                new BaseAndScale(Unsafe.ARRAY_SHORT_BASE_OFFSET, Unsafe.ARRAY_SHORT_INDEX_SCALE);
+        public static final BaseAndScale INT =
+                new BaseAndScale(Unsafe.ARRAY_INT_BASE_OFFSET, Unsafe.ARRAY_INT_INDEX_SCALE);
+        public static final BaseAndScale FLOAT =
+                new BaseAndScale(Unsafe.ARRAY_FLOAT_BASE_OFFSET, Unsafe.ARRAY_FLOAT_INDEX_SCALE);
+        public static final BaseAndScale LONG =
+                new BaseAndScale(Unsafe.ARRAY_LONG_BASE_OFFSET, Unsafe.ARRAY_LONG_INDEX_SCALE);
+        public static final BaseAndScale DOUBLE =
+                new BaseAndScale(Unsafe.ARRAY_DOUBLE_BASE_OFFSET, Unsafe.ARRAY_DOUBLE_INDEX_SCALE);
+
+        public static BaseAndScale of(Object array) {
+            return switch (array) {
+                case byte[]   _ -> BaseAndScale.BYTE;
+                case char[]   _ -> BaseAndScale.CHAR;
+                case short[]  _ -> BaseAndScale.SHORT;
+                case int[]    _ -> BaseAndScale.INT;
+                case float[]  _ -> BaseAndScale.FLOAT;
+                case long[]   _ -> BaseAndScale.LONG;
+                case double[] _ -> BaseAndScale.DOUBLE;
+                default -> throw new IllegalArgumentException("Not a supported array class: " + array.getClass().getSimpleName());
+            };
+        }
+
+    }
+
 }

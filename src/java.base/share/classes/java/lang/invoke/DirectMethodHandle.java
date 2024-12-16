@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2008, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -128,12 +128,11 @@ sealed class DirectMethodHandle extends MethodHandle {
     }
     static DirectMethodHandle make(MemberName member) {
         if (member.isConstructor())
-            return makeAllocator(member);
+            return makeAllocator(member.getDeclaringClass(), member);
         return make(member.getDeclaringClass(), member);
     }
-    private static DirectMethodHandle makeAllocator(MemberName ctor) {
+    static DirectMethodHandle makeAllocator(Class<?> instanceClass, MemberName ctor) {
         assert(ctor.isConstructor() && ctor.getName().equals("<init>"));
-        Class<?> instanceClass = ctor.getDeclaringClass();
         ctor = ctor.asConstructor();
         assert(ctor.isConstructor() && ctor.getReferenceKind() == REF_newInvokeSpecial) : ctor;
         MethodType mtype = ctor.getMethodType().changeReturnType(instanceClass);
@@ -170,8 +169,8 @@ sealed class DirectMethodHandle extends MethodHandle {
     }
 
     @Override
-    String internalProperties() {
-        return "\n& DMH.MN="+internalMemberName();
+    String internalProperties(int indentLevel) {
+        return "\n" + debugPrefix(indentLevel) + "& DMH.MN=" + internalMemberName();
     }
 
     //// Implementation methods.
@@ -251,11 +250,17 @@ sealed class DirectMethodHandle extends MethodHandle {
         default:  throw new InternalError("which="+which);
         }
 
-        MethodType mtypeWithArg = mtype.appendParameterTypes(MemberName.class);
-        if (doesAlloc)
-            mtypeWithArg = mtypeWithArg
-                    .insertParameterTypes(0, Object.class)  // insert newly allocated obj
-                    .changeReturnType(void.class);          // <init> returns void
+        MethodType mtypeWithArg;
+        if (doesAlloc) {
+            var ptypes = mtype.ptypes();
+            var newPtypes = new Class<?>[ptypes.length + 2];
+            newPtypes[0] = Object.class; // insert newly allocated obj
+            System.arraycopy(ptypes, 0, newPtypes, 1, ptypes.length);
+            newPtypes[newPtypes.length - 1] = MemberName.class;
+            mtypeWithArg = MethodType.methodType(void.class, newPtypes, true);
+        } else {
+            mtypeWithArg = mtype.appendParameterTypes(MemberName.class);
+        }
         MemberName linker = new MemberName(MethodHandle.class, linkerName, mtypeWithArg, REF_invokeStatic);
         try {
             linker = IMPL_NAMES.resolveOrFail(REF_invokeStatic, linker, null, LM_TRUSTED,
@@ -271,7 +276,7 @@ sealed class DirectMethodHandle extends MethodHandle {
         final int GET_MEMBER  = nameCursor++;
         final int CHECK_RECEIVER = (needsReceiverCheck ? nameCursor++ : -1);
         final int LINKER_CALL = nameCursor++;
-        Name[] names = arguments(nameCursor - ARG_LIMIT, mtype.invokerType());
+        Name[] names = invokeArguments(nameCursor - ARG_LIMIT, mtype);
         assert(names.length == nameCursor);
         if (doesAlloc) {
             // names = { argx,y,z,... new C, init method }
@@ -297,7 +302,7 @@ sealed class DirectMethodHandle extends MethodHandle {
             result = NEW_OBJ;
         }
         names[LINKER_CALL] = new Name(linker, outArgs);
-        LambdaForm lform = new LambdaForm(ARG_LIMIT, names, result, kind);
+        LambdaForm lform = LambdaForm.create(ARG_LIMIT, names, result, kind);
 
         // This is a tricky bit of code.  Don't send it through the LF interpreter.
         lform.compileToBytecode();
@@ -600,7 +605,7 @@ sealed class DirectMethodHandle extends MethodHandle {
     }
 
     Object checkCast(Object obj) {
-        return member.getReturnType().cast(obj);
+        return member.getMethodType().returnType().cast(obj);
     }
 
     // Caching machinery for field accessors:
@@ -787,7 +792,7 @@ sealed class DirectMethodHandle extends MethodHandle {
         final int LINKER_CALL = nameCursor++;
         final int POST_CAST = (needsCast && isGetter ? nameCursor++ : -1);
         final int RESULT    = nameCursor-1;  // either the call or the cast
-        Name[] names = arguments(nameCursor - ARG_LIMIT, mtype.invokerType());
+        Name[] names = invokeArguments(nameCursor - ARG_LIMIT, mtype);
         if (needsInit)
             names[INIT_BAR] = new Name(getFunction(NF_ensureInitialized), names[DMH_THIS]);
         if (needsCast && !isGetter)
@@ -814,9 +819,9 @@ sealed class DirectMethodHandle extends MethodHandle {
         LambdaForm form;
         if (needsCast || needsInit) {
             // can't use the pre-generated form when casting and/or initializing
-            form = new LambdaForm(ARG_LIMIT, names, RESULT);
+            form = LambdaForm.create(ARG_LIMIT, names, RESULT);
         } else {
-            form = new LambdaForm(ARG_LIMIT, names, RESULT, kind);
+            form = LambdaForm.create(ARG_LIMIT, names, RESULT, kind);
         }
 
         if (LambdaForm.debugNames()) {

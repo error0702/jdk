@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1995, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1995, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -418,7 +418,6 @@ public class MediaTracker implements java.io.Serializable {
      * @return      {@code true} if all images were successfully
      *                       loaded; {@code false} otherwise
      * @see         java.awt.MediaTracker#waitForID(int)
-     * @see         java.awt.MediaTracker#waitForAll(long)
      * @see         java.awt.MediaTracker#isErrorAny
      * @see         java.awt.MediaTracker#isErrorID
      * @throws   InterruptedException  if any thread has
@@ -527,7 +526,7 @@ public class MediaTracker implements java.io.Serializable {
      * @return      {@code true} if all images have finished loading,
      *                       have been aborted, or have encountered
      *                       an error; {@code false} otherwise
-     * @see         java.awt.MediaTracker#checkID(int, boolean)
+     * @see         java.awt.MediaTracker#checkID(int)
      * @see         java.awt.MediaTracker#checkAll()
      * @see         java.awt.MediaTracker#isErrorAny()
      * @see         java.awt.MediaTracker#isErrorID(int)
@@ -928,7 +927,6 @@ abstract class MediaEntry {
  * The entry of the list of {@code Images} that is being tracked by the
  * {@code MediaTracker}.
  */
-@SuppressWarnings("serial") // MediaEntry does not have a no-arg ctor
 class ImageMediaEntry extends MediaEntry implements ImageObserver,
 java.io.Serializable {
     @SuppressWarnings("serial") // Not statically typed as Serializable

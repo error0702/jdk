@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2021, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -24,7 +24,6 @@
 package snippets;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.net.URI;
@@ -43,6 +42,7 @@ import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.ModuleElement;
 import javax.lang.model.element.PackageElement;
+import javax.lang.model.element.QualifiedNameable;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.util.Elements;
@@ -93,6 +93,24 @@ public class SnippetUtils {
      */
     public static class ConfigurationException extends Exception {
         public ConfigurationException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Exception used to report that a snippet could not be found.
+     */
+    public static class SnippetNotFoundException extends Exception {
+        public SnippetNotFoundException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Exception used to report that a doc comment could not be found.
+     */
+    public static class DocCommentNotFoundException extends Exception {
+        public DocCommentNotFoundException(String message) {
             super(message);
         }
     }
@@ -218,9 +236,15 @@ public class SnippetUtils {
      *
      * @param tree the doc comment tree
      * @param id   the id
+     *
+     * @throws SnippetNotFoundException if the snippet cannot be found
      */
-    public SnippetTree getSnippetById(DocCommentTree tree, String id) {
-        return new SnippetFinder().scan(tree, id);
+    public SnippetTree getSnippetById(DocCommentTree tree, String id) throws SnippetNotFoundException {
+        SnippetTree result = new SnippetFinder().scan(tree, id);
+        if (result == null) {
+            throw new SnippetNotFoundException(id);
+        }
+        return result;
     }
 
     /**
@@ -228,10 +252,18 @@ public class SnippetUtils {
      *
      * @param element the element
      * @param id      the id
+     *
+     * @throws DocCommentNotFoundException if the doc comment for the element cannot be found
+     * @throws SnippetNotFoundException if the snippet cannot be found
      */
-    public SnippetTree getSnippetById(Element element, String id) {
-        DocCommentTree tree = getDocCommentTree(element);
-        return new SnippetFinder().scan(tree, id);
+    public SnippetTree getSnippetById(Element element, String id)
+            throws DocCommentNotFoundException, SnippetNotFoundException {
+        DocCommentTree docCommentTree = getDocCommentTree(element);
+        if (docCommentTree == null) {
+            var name = (element instanceof QualifiedNameable q) ? q.getQualifiedName() : element.getSimpleName();
+            throw new DocCommentNotFoundException(element.getKind() + " " + name);
+        }
+        return getSnippetById(docCommentTree, id);
     }
 
     /**
@@ -523,11 +555,7 @@ public class SnippetUtils {
                         }
                     }""".formatted(body);
         };
-        JavaFileObject fo = new SimpleJavaFileObject(uri, JavaFileObject.Kind.SOURCE) {
-            public CharSequence getCharContent(boolean ignoreEncodingErrors) {
-                return compUnit;
-            }
-        };
+        JavaFileObject fo = SimpleJavaFileObject.forSource(uri, compUnit);
 
         JavaFileManager fm = compiler.getStandardFileManager(dl, null, null);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -295,6 +295,7 @@ getAllConfigs (JNIEnv *env, int screen, AwtScreenDataPtr screenDataPtr) {
     // NB: should be invoked only while holding the AWT lock
     DASSERT(screen >= 0 && screen < awt_numScreens);
 
+    jboolean success = JNI_FALSE;
     int i;
     int n8p=0, n12p=0, n8s=0, n8gs=0, n8sg=0, n1sg=0, nTrue=0;
     int nConfig;
@@ -303,7 +304,6 @@ getAllConfigs (JNIEnv *env, int screen, AwtScreenDataPtr screenDataPtr) {
     AwtGraphicsConfigDataPtr *graphicsConfigs;
     AwtGraphicsConfigDataPtr defaultConfig;
     int ind;
-    char errmsg[128];
     int xinawareScreen;
     void* xrenderLibHandle = NULL;
     XRenderFindVisualFormatFunc* xrenderFindVisualFormat = NULL;
@@ -382,7 +382,7 @@ getAllConfigs (JNIEnv *env, int screen, AwtScreenDataPtr screenDataPtr) {
          */
         screenDataPtr->defaultConfig = makeDefaultConfig(env, screen);
         if (screenDataPtr->defaultConfig == NULL) {
-            return;
+            goto cleanup;
         }
     }
 
@@ -565,10 +565,17 @@ getAllConfigs (JNIEnv *env, int screen, AwtScreenDataPtr screenDataPtr) {
                 sizeof (XVisualInfo));
     }
 
+    success = JNI_TRUE;
     screenDataPtr->numConfigs = nConfig;
     screenDataPtr->configs = graphicsConfigs;
 
 cleanup:
+    if (success != JNI_TRUE) {
+        for (i = 0; i < nConfig; i++) {
+            free(graphicsConfigs[i]);
+        }
+        free(graphicsConfigs);
+    }
     if (n8p != 0)
        XFree (pVI8p);
     if (n12p != 0)
@@ -714,7 +721,6 @@ awt_init_Display(JNIEnv *env, jobject this)
     jclass klass;
     Display *dpy;
     char errmsg[128];
-    int i;
 
     if (awt_display) {
         return awt_display;
@@ -864,7 +870,6 @@ extern int mitShmPermissionMask;
 void TryInitMITShm(JNIEnv *env, jint *shmExt, jint *shmPixmaps) {
     XShmSegmentInfo shminfo;
     int XShmMajor, XShmMinor;
-    int a, b, c;
 
     AWT_LOCK();
     if (canUseShmExt != UNSET_MITSHM) {
@@ -911,7 +916,7 @@ void TryInitMITShm(JNIEnv *env, jint *shmExt, jint *shmPixmaps) {
         resetXShmAttachFailed();
         /**
          * The J2DXErrHandler handler will set xshmAttachFailed
-         * to JNI_TRUE if any Shm error has occured.
+         * to JNI_TRUE if any Shm error has occurred.
          */
         EXEC_WITH_XERROR_HANDLER(XShmAttachXErrHandler,
                                  XShmAttach(awt_display, &shminfo));
@@ -1146,7 +1151,7 @@ JNIEnv *env, jobject this, jint visualNum, jint screen)
 
     AwtGraphicsConfigData *adata = NULL;
     AwtScreenData asd = x11Screens[screen];
-    int i, n;
+    int i;
     int depth;
     XImage * tempImage;
 
@@ -1282,7 +1287,7 @@ Java_sun_awt_X11GraphicsDevice_pGetBounds(JNIEnv *env, jobject this, jint screen
                     xwa.width, xwa.height);
         }
 
-        if ((*env)->ExceptionOccurred(env)) {
+        if ((*env)->ExceptionCheck(env)) {
             return NULL;
         }
     }

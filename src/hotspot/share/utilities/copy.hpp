@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2003, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -41,7 +41,6 @@ extern "C" {
   void _Copy_conjoint_jshorts_atomic(const jshort* from, jshort* to, size_t count);
   void _Copy_conjoint_jints_atomic  (const jint*   from, jint*   to, size_t count);
   void _Copy_conjoint_jlongs_atomic (const jlong*  from, jlong*  to, size_t count);
-  void _Copy_conjoint_oops_atomic   (const oop*    from, oop*    to, size_t count);
 
   void _Copy_arrayof_conjoint_bytes  (const HeapWord* from, HeapWord* to, size_t count);
   void _Copy_arrayof_conjoint_jshorts(const HeapWord* from, HeapWord* to, size_t count);
@@ -212,6 +211,7 @@ class Copy : AllStatic {
     // byte_count is in bytes to check its alignment
     assert_params_ok(from, to, HeapWordSize);
     assert_byte_count_ok(byte_count, HeapWordSize);
+    if (byte_count == 0) return;
 
     size_t count = align_up(byte_count, HeapWordSize) >> LogHeapWordSize;
     assert(from <= to || to + count <= from, "do not overwrite source data");
@@ -335,21 +335,21 @@ class Copy : AllStatic {
   }
 
   static void assert_params_ok(const void* from, void* to, intptr_t alignment) {
-    assert(is_aligned(from, alignment), "must be aligned: " INTPTR_FORMAT, p2i(from));
-    assert(is_aligned(to, alignment),   "must be aligned: " INTPTR_FORMAT, p2i(to));
+    assert(is_aligned(from, alignment), "must be aligned: " PTR_FORMAT, p2i(from));
+    assert(is_aligned(to, alignment),   "must be aligned: " PTR_FORMAT, p2i(to));
   }
 
   static void assert_params_ok(HeapWord* to, intptr_t alignment) {
-    assert(is_aligned(to, alignment), "must be aligned: " INTPTR_FORMAT, p2i(to));
+    assert(is_aligned(to, alignment), "must be aligned: " PTR_FORMAT, p2i(to));
   }
 
   static void assert_params_aligned(const HeapWord* from, HeapWord* to) {
-    assert(is_aligned(from, BytesPerLong), "must be aligned: " INTPTR_FORMAT, p2i(from));
-    assert(is_aligned(to, BytesPerLong),   "must be aligned: " INTPTR_FORMAT, p2i(to));
+    assert(is_aligned(from, BytesPerLong), "must be aligned: " PTR_FORMAT, p2i(from));
+    assert(is_aligned(to, BytesPerLong),   "must be aligned: " PTR_FORMAT, p2i(to));
   }
 
   static void assert_params_aligned(HeapWord* to) {
-    assert(is_aligned(to, BytesPerLong), "must be aligned: " INTPTR_FORMAT, p2i(to));
+    assert(is_aligned(to, BytesPerLong), "must be aligned: " PTR_FORMAT, p2i(to));
   }
 
   static void assert_byte_count_ok(size_t byte_count, size_t unit_size) {

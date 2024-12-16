@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2005, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -29,6 +29,7 @@
 #include "gc/parallel/psCompactionManager.inline.hpp"
 #include "gc/parallel/psOldGen.hpp"
 #include "gc/parallel/psParallelCompact.inline.hpp"
+#include "gc/shared/preservedMarks.inline.hpp"
 #include "gc/shared/taskqueue.inline.hpp"
 #include "logging/log.hpp"
 #include "memory/iterator.inline.hpp"
@@ -39,64 +40,65 @@
 #include "oops/objArrayKlass.inline.hpp"
 #include "oops/oop.inline.hpp"
 
-PSOldGen*               ParCompactionManager::_old_gen = NULL;
-ParCompactionManager**  ParCompactionManager::_manager_array = NULL;
+PSOldGen*               ParCompactionManager::_old_gen = nullptr;
+ParCompactionManager**  ParCompactionManager::_manager_array = nullptr;
 
-ParCompactionManager::OopTaskQueueSet*      ParCompactionManager::_oop_task_queues = NULL;
-ParCompactionManager::ObjArrayTaskQueueSet* ParCompactionManager::_objarray_task_queues = NULL;
-ParCompactionManager::RegionTaskQueueSet*   ParCompactionManager::_region_task_queues = NULL;
+ParCompactionManager::OopTaskQueueSet*      ParCompactionManager::_oop_task_queues = nullptr;
+ParCompactionManager::ObjArrayTaskQueueSet* ParCompactionManager::_objarray_task_queues = nullptr;
+ParCompactionManager::RegionTaskQueueSet*   ParCompactionManager::_region_task_queues = nullptr;
 
-ObjectStartArray*    ParCompactionManager::_start_array = NULL;
-ParMarkBitMap*       ParCompactionManager::_mark_bitmap = NULL;
-GrowableArray<size_t >* ParCompactionManager::_shadow_region_array = NULL;
-Monitor*                ParCompactionManager::_shadow_region_monitor = NULL;
+ObjectStartArray*    ParCompactionManager::_start_array = nullptr;
+ParMarkBitMap*       ParCompactionManager::_mark_bitmap = nullptr;
+GrowableArray<size_t >* ParCompactionManager::_shadow_region_array = nullptr;
+Monitor*                ParCompactionManager::_shadow_region_monitor = nullptr;
 
-ParCompactionManager::ParCompactionManager() {
+PreservedMarksSet* ParCompactionManager::_preserved_marks_set = nullptr;
+
+ParCompactionManager::ParCompactionManager(PreservedMarks* preserved_marks,
+                                           ReferenceProcessor* ref_processor)
+  : _mark_and_push_closure(this, ref_processor) {
 
   ParallelScavengeHeap* heap = ParallelScavengeHeap::heap();
 
   _old_gen = heap->old_gen();
   _start_array = old_gen()->start_array();
 
-  reset_bitmap_query_cache();
+  _preserved_marks = preserved_marks;
+  _marking_stats_cache = nullptr;
 }
 
 void ParCompactionManager::initialize(ParMarkBitMap* mbm) {
-  assert(ParallelScavengeHeap::heap() != NULL,
-    "Needed for initialization");
+  assert(ParallelScavengeHeap::heap() != nullptr, "Needed for initialization");
+  assert(PSParallelCompact::ref_processor() != nullptr, "precondition");
+  assert(ParallelScavengeHeap::heap()->workers().max_workers() != 0, "Not initialized?");
 
   _mark_bitmap = mbm;
 
   uint parallel_gc_threads = ParallelScavengeHeap::heap()->workers().max_workers();
 
-  assert(_manager_array == NULL, "Attempt to initialize twice");
+  assert(_manager_array == nullptr, "Attempt to initialize twice");
   _manager_array = NEW_C_HEAP_ARRAY(ParCompactionManager*, parallel_gc_threads, mtGC);
 
   _oop_task_queues = new OopTaskQueueSet(parallel_gc_threads);
   _objarray_task_queues = new ObjArrayTaskQueueSet(parallel_gc_threads);
   _region_task_queues = new RegionTaskQueueSet(parallel_gc_threads);
 
+  _preserved_marks_set = new PreservedMarksSet(true);
+  _preserved_marks_set->init(parallel_gc_threads);
+
   // Create and register the ParCompactionManager(s) for the worker threads.
   for(uint i=0; i<parallel_gc_threads; i++) {
-    _manager_array[i] = new ParCompactionManager();
-    oop_task_queues()->register_queue(i, _manager_array[i]->marking_stack());
+    _manager_array[i] = new ParCompactionManager(_preserved_marks_set->get(i),
+                                                 PSParallelCompact::ref_processor());
+    oop_task_queues()->register_queue(i, _manager_array[i]->oop_stack());
     _objarray_task_queues->register_queue(i, &_manager_array[i]->_objarray_stack);
     region_task_queues()->register_queue(i, _manager_array[i]->region_stack());
   }
 
-  assert(ParallelScavengeHeap::heap()->workers().max_workers() != 0,
-    "Not initialized?");
-
-  _shadow_region_array = new (ResourceObj::C_HEAP, mtGC) GrowableArray<size_t >(10, mtGC);
+  _shadow_region_array = new (mtGC) GrowableArray<size_t >(10, mtGC);
 
   _shadow_region_monitor = new Monitor(Mutex::nosafepoint, "CompactionManager_lock");
-}
 
-void ParCompactionManager::reset_all_bitmap_query_caches() {
-  uint parallel_gc_threads = ParallelScavengeHeap::heap()->workers().max_workers();
-  for (uint i=0; i<parallel_gc_threads; i++) {
-    _manager_array[i]->reset_bitmap_query_cache();
-  }
 }
 
 void ParCompactionManager::flush_all_string_dedup_requests() {
@@ -109,18 +111,18 @@ void ParCompactionManager::flush_all_string_dedup_requests() {
 ParCompactionManager*
 ParCompactionManager::gc_thread_compaction_manager(uint index) {
   assert(index < ParallelGCThreads, "index out of range");
-  assert(_manager_array != NULL, "Sanity");
+  assert(_manager_array != nullptr, "Sanity");
   return _manager_array[index];
 }
 
 inline void ParCompactionManager::publish_and_drain_oop_tasks() {
   oop obj;
-  while (marking_stack()->pop_overflow(obj)) {
-    if (!marking_stack()->try_push_to_taskqueue(obj)) {
+  while (oop_stack()->pop_overflow(obj)) {
+    if (!oop_stack()->try_push_to_taskqueue(obj)) {
       follow_contents(obj);
     }
   }
-  while (marking_stack()->pop_local(obj)) {
+  while (oop_stack()->pop_local(obj)) {
     follow_contents(obj);
   }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000, 2021, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2000, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -90,16 +90,9 @@ public class JPEGImageReader extends ImageReader {
         initStatic();
     }
 
-    @SuppressWarnings("removal")
+    @SuppressWarnings("restricted")
     private static void initStatic() {
-        java.security.AccessController.doPrivileged(
-            new java.security.PrivilegedAction<Void>() {
-                @Override
-                public Void run() {
-                    System.loadLibrary("javajpeg");
-                    return null;
-                }
-            });
+        System.loadLibrary("javajpeg");
         initReaderIDs(ImageInputStream.class,
                       JPEGQTable.class,
                       JPEGHuffmanTable.class);
@@ -1160,10 +1153,7 @@ public class JPEGImageReader extends ImageReader {
             cbLock.check();
             try {
                 readInternal(imageIndex, param, false);
-            } catch (RuntimeException e) {
-                resetLibraryState(structPointer);
-                throw e;
-            } catch (IOException e) {
+            } catch (RuntimeException | IOException e) {
                 resetLibraryState(structPointer);
                 throw e;
             }
@@ -1632,10 +1622,7 @@ public class JPEGImageReader extends ImageReader {
                 target = target.createWritableTranslatedChild(saveDestOffset.x,
                                                               saveDestOffset.y);
             }
-        } catch (RuntimeException e) {
-            resetLibraryState(structPointer);
-            throw e;
-        } catch (IOException e) {
+        } catch (RuntimeException | IOException e) {
             resetLibraryState(structPointer);
             throw e;
         } finally {
@@ -1830,7 +1817,7 @@ public class JPEGImageReader extends ImageReader {
         Thread currThread = Thread.currentThread();
         if (theThread == null || theThread != currThread) {
             throw new IllegalStateException("Attempt to clear thread lock " +
-                                            " form wrong thread." +
+                                            " from wrong thread." +
                                             " Locked thread: " + theThread +
                                             "; current thread: " + currThread);
         }

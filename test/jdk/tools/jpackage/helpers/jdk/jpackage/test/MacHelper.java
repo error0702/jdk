@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2019, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,6 +35,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import static java.util.stream.Collectors.toSet;
 import java.util.stream.Stream;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -42,11 +43,11 @@ import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.xpath.XPath;
 import javax.xml.xpath.XPathConstants;
 import javax.xml.xpath.XPathFactory;
-import jdk.jpackage.internal.IOUtils;
-import jdk.jpackage.test.Functional.ThrowingConsumer;
-import jdk.jpackage.test.Functional.ThrowingSupplier;
+import jdk.jpackage.internal.util.function.ThrowingConsumer;
+import jdk.jpackage.internal.util.function.ThrowingSupplier;
 import jdk.jpackage.test.PackageTest.PackageHandlers;
 import jdk.jpackage.internal.RetryExecutor;
+import jdk.jpackage.internal.util.PathUtils;
 import org.xml.sax.SAXException;
 import org.w3c.dom.NodeList;
 
@@ -57,15 +58,28 @@ public final class MacHelper {
         cmd.verifyIsOfType(PackageType.MAC_DMG);
 
         // Explode DMG assuming this can require interaction, thus use `yes`.
-        var plist = readPList(Executor.of("sh", "-c",
-                String.join(" ", "yes", "|", "/usr/bin/hdiutil", "attach",
+        String attachCMD[] = {
+            "sh", "-c",
+            String.join(" ", "yes", "|", "/usr/bin/hdiutil", "attach",
                         JPackageCommand.escapeAndJoin(
-                                cmd.outputBundle().toString()), "-plist"))
-                .dumpOutput()
-                .executeAndGetOutput());
-
-        final Path mountPoint = Path.of(plist.queryValue("mount-point"));
+                                cmd.outputBundle().toString()), "-plist")};
+        RetryExecutor attachExecutor = new RetryExecutor();
         try {
+            // 10 times with 6 second delays.
+            attachExecutor.setMaxAttemptsCount(10)
+                    .setAttemptTimeoutMillis(6000)
+                    .setWriteOutputToFile(true)
+                    .saveOutput(true)
+                    .execute(attachCMD);
+        } catch (IOException ex) {
+            throw new RuntimeException(ex);
+        }
+
+        Path mountPoint = null;
+        try {
+            var plist = readPList(attachExecutor.getOutput());
+            mountPoint = Path.of(plist.queryValue("mount-point"));
+
             // code here used to copy just <runtime name> or <app name>.app
             // We now have option to include arbitrary content, so we copy
             // everything in the mounted image.
@@ -77,28 +91,31 @@ public final class MacHelper {
                 ThrowingConsumer.toConsumer(consumer).accept(childPath);
             }
         } finally {
-            String cmdline[] = {
+            String detachCMD[] = {
                 "/usr/bin/hdiutil",
                 "detach",
                 "-verbose",
                 mountPoint.toAbsolutePath().toString()};
             // "hdiutil detach" might not work right away due to resource busy error, so
             // repeat detach several times.
-            RetryExecutor retryExecutor = new RetryExecutor();
+            RetryExecutor detachExecutor = new RetryExecutor();
             // Image can get detach even if we got resource busy error, so stop
             // trying to detach it if it is no longer attached.
-            retryExecutor.setExecutorInitializer(exec -> {
-                if (!Files.exists(mountPoint)) {
-                    retryExecutor.abort();
+            final Path mp = mountPoint;
+            detachExecutor.setExecutorInitializer(exec -> {
+                if (!Files.exists(mp)) {
+                    detachExecutor.abort();
                 }
             });
             try {
                 // 10 times with 6 second delays.
-                retryExecutor.setMaxAttemptsCount(10)
+                detachExecutor.setMaxAttemptsCount(10)
                         .setAttemptTimeoutMillis(6000)
-                        .execute(cmdline);
+                        .setWriteOutputToFile(true)
+                        .saveOutput(true)
+                        .execute(detachCMD);
             } catch (IOException ex) {
-                if (!retryExecutor.isAborted()) {
+                if (!detachExecutor.isAborted()) {
                     // Now force to detach if it still attached
                     if (Files.exists(mountPoint)) {
                         Executor.of("/usr/bin/hdiutil", "detach",
@@ -195,7 +212,7 @@ public final class MacHelper {
             // Unpack all ".pkg" files from $dataDir folder in $unpackDir folder
             try (var dataListing = Files.list(dataDir)) {
                 dataListing.filter(file -> {
-                    return ".pkg".equals(IOUtils.getSuffix(file.getFileName()));
+                    return ".pkg".equals(PathUtils.getSuffix(file.getFileName()));
                 }).forEach(ThrowingConsumer.toConsumer(pkgDir -> {
                     // Installation root of the package is stored in
                     // /pkg-info@install-location attribute in $pkgDir/PackageInfo xml file
@@ -239,6 +256,38 @@ public final class MacHelper {
         };
 
         return pkg;
+    }
+
+    static void verifyBundleStructure(JPackageCommand cmd) {
+        final Path bundleRoot;
+        if (cmd.isImagePackageType()) {
+            bundleRoot = cmd.outputBundle();
+        } else {
+            bundleRoot = cmd.pathToUnpackedPackageFile(
+                    cmd.appInstallationDirectory());
+        }
+
+        TKit.assertDirectoryContent(bundleRoot).match(Path.of("Contents"));
+
+        final var contentsDir = bundleRoot.resolve("Contents");
+        final var expectedContentsItems = cmd.isRuntime() ? RUNTIME_BUNDLE_CONTENTS : APP_BUNDLE_CONTENTS;
+
+        var contentsVerifier = TKit.assertDirectoryContent(contentsDir);
+        if (!cmd.hasArgument("--app-content")) {
+            contentsVerifier.match(expectedContentsItems);
+        } else {
+            // Additional content added to the bundle.
+            // Verify there is no period (.) char in the names of additional directories if any.
+            contentsVerifier.contains(expectedContentsItems);
+            contentsVerifier = contentsVerifier.removeAll(expectedContentsItems);
+            contentsVerifier.match(contentsVerifier.items().stream().filter(path -> {
+                if (Files.isDirectory(contentsDir.resolve(path))) {
+                    return !path.getFileName().toString().contains(".");
+                } else {
+                    return true;
+                }
+            }).collect(toSet()));
+        }
     }
 
     static String getBundleName(JPackageCommand cmd) {
@@ -374,5 +423,19 @@ public final class MacHelper {
     static final Set<Path> CRITICAL_RUNTIME_FILES = Set.of(Path.of(
             "Contents/Home/lib/server/libjvm.dylib"));
 
-    private final static Method getServicePListFileName = initGetServicePListFileName();
+    private static final Method getServicePListFileName = initGetServicePListFileName();
+
+    private static final Set<Path> APP_BUNDLE_CONTENTS = Stream.of(
+            "Info.plist",
+            "MacOS",
+            "app",
+            "runtime",
+            "Resources",
+            "PkgInfo",
+            "_CodeSignature"
+    ).map(Path::of).collect(toSet());
+
+    private static final Set<Path> RUNTIME_BUNDLE_CONTENTS = Stream.of(
+            "Home"
+    ).map(Path::of).collect(toSet());
 }

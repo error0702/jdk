@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2015, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -52,7 +52,6 @@ import tests.JImageGenerator;
  * @requires (vm.compMode != "Xcomp" & os.maxMemory >= 2g)
  * @library ../lib
  * @modules java.base/jdk.internal.jimage
- *          jdk.jdeps/com.sun.tools.classfile
  *          jdk.jlink/jdk.tools.jlink.internal
  *          jdk.jlink/jdk.tools.jlink.plugin
  *          jdk.jlink/jdk.tools.jimage
@@ -309,6 +308,15 @@ public class JLinkTest {
                     "--compress=2:filter=^/java.base/java/lang/*");
         }
 
+        // Unix style compression arguments
+        {
+            testCompress(helper, "compresscmdcompositezip6", "--compress", "zip-6");
+        }
+
+        {
+            testCompress(helper, "compresscmdcompositezip0", "--compress", "zip-0");
+        }
+
         // compress 0
         {
             testCompress(helper, "compress0filtercmdcomposite2",
@@ -325,6 +333,23 @@ public class JLinkTest {
         {
             testCompress(helper, "compress2filtercmdcomposite2",
                     "--compress=2:filter=^/java.base/java/lang/*");
+        }
+        // compress zip-0 with filter
+        {
+            testCompress(helper, "compresszip0filtercmdcomposite2",
+                    "--compress=zip-0:filter=^/java.base/java/lang/*");
+        }
+
+        // compress zip-6 with filter
+        {
+            testCompress(helper, "compresszip6filtercmdcomposite2",
+                    "--compress=zip-6:filter=^/java.base/java/lang/*");
+        }
+
+        // compress zip-9 with filter
+        {
+            testCompress(helper, "compresszip9filtercmdcomposite2",
+                    "--compress=zip-9:filter=^/java.base/java/lang/*");
         }
 
         // invalid compress level
